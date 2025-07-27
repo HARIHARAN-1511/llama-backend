@@ -1,58 +1,58 @@
 const express = require("express");
 const cors = require("cors");
-const bodyParser = require("body-parser");
-const fetch = require("node-fetch");
 const multer = require("multer");
-const pdfParse = require("pdf-parse");
 const fs = require("fs");
+const pdfParse = require("pdf-parse");
+const fetch = require("node-fetch");
 require("dotenv").config();
 
 const app = express();
-app.use(cors());
-app.use(bodyParser.json());
+const PORT = process.env.PORT || 5000;
 
-// Multer setup
-const upload = multer({ dest: "uploads/" });
+app.use(cors({
+  origin: "*", // or restrict to your Vercel URL
+  methods: ["GET", "POST"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+app.use(express.json());
 
-// Groq API details
+// -------- Groq config ----------
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "llama3-70b-8192";
 
-// Conversation memory
+// -------- Memory ---------------
 let conversation = [
   { role: "system", content: "You are a helpful AI assistant like ChatGPT." }
 ];
-
-// PDF context memory
 let pdfContext = "";
 
-/**
- * Chat endpoint
- */
+// -------- Uploads --------------
+const upload = multer({ dest: "uploads/" });
+
+// -------- Health check ----------
+app.get("/ping", (_req, res) => res.json({ ok: true, ts: Date.now() }));
+
+// -------- Chat ------------------
 app.post("/chat", async (req, res) => {
   try {
-    const userMessage = req.body.message;
-    if (!userMessage) {
-      return res.status(400).json({ reply: "Message cannot be empty." });
-    }
+    const userMessage = req.body.message?.trim();
+    if (!userMessage) return res.status(400).json({ reply: "Message cannot be empty." });
 
-    // Create messages array
-    let messages = [
-      { role: "system", content: "You are a helpful assistant." }
+    // Build the prompt/messages to Groq
+    const messages = [
+      { role: "system", content: "You are a helpful assistant." },
     ];
 
-    // If PDF content is available, include it as context
     if (pdfContext) {
       messages.push({
         role: "user",
-        content: `PDF Content: ${pdfContext}\n\nUser Question: ${userMessage}`
+        content: `Here is text extracted from a PDF the user uploaded:\n\n${pdfContext}\n\nNow answer the user's question based ONLY on that PDF when relevant.\n\nUser Question: ${userMessage}`
       });
     } else {
       messages.push({ role: "user", content: userMessage });
     }
 
-    // Call Groq API
-    const response = await fetch(GROQ_API_URL, {
+    const groqRes = await fetch(GROQ_API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -60,65 +60,58 @@ app.post("/chat", async (req, res) => {
       },
       body: JSON.stringify({
         model: MODEL,
-        messages,
+        messages
       }),
     });
 
-    const data = await response.json();
-    console.log("Groq Response:", data);
+    if (!groqRes.ok) {
+      const text = await groqRes.text();
+      console.error("Groq error:", text);
+      return res.status(500).json({ reply: "Groq API error." });
+    }
 
+    const data = await groqRes.json();
     const botReply = data.choices?.[0]?.message?.content || "No response from LLaMA 3.";
     res.json({ reply: botReply });
   } catch (err) {
-    console.error("Error:", err);
+    console.error("Chat error:", err);
     res.status(500).json({ reply: "Error connecting to Groq API." });
   }
 });
 
-/**
- * Reset conversation and PDF context
- */
-app.post("/reset", (req, res) => {
+// -------- Reset -----------------
+app.post("/reset", (_req, res) => {
   conversation = [
     { role: "system", content: "You are a helpful AI assistant like ChatGPT." }
   ];
   pdfContext = "";
-  res.json({ reply: "Conversation and PDF context have been reset." });
+  res.json({ reply: "Conversation & PDF context reset." });
 });
 
-/**
- * PDF upload endpoint
- */
+// -------- PDF upload ------------
 app.post("/upload", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    if (!req.file) return res.status(400).json({ error: "No file uploaded." });
 
     const filePath = req.file.path;
     const dataBuffer = fs.readFileSync(filePath);
     const pdfData = await pdfParse(dataBuffer);
 
-    // Save PDF content for chatbot context
-    pdfContext = pdfData.text;
+    pdfContext = pdfData.text || "";
+    fs.unlink(filePath, () => {}); // cleanup temp file
 
-    // Optionally, delete the file after processing
-    fs.unlinkSync(filePath);
-
-    res.json({ text: pdfData.text });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "File processing failed" });
+    res.json({ text: pdfContext });
+  } catch (err) {
+    console.error("PDF upload error:", err);
+    res.status(500).json({ error: "File processing failed." });
   }
 });
 
-/**
- * Image upload endpoint
- */
-app.post("/image", upload.single("image"), async (req, res) => {
+// -------- Image upload ----------
+app.post("/image", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No image uploaded." });
-    }
-    // For now, we just confirm the image upload
+    if (!req.file) return res.status(400).json({ error: "No image uploaded." });
+    // (You could forward this to a vision model here.)
     res.json({ message: "Image received", filename: req.file.originalname });
   } catch (err) {
     console.error("Image upload error:", err);
@@ -126,4 +119,6 @@ app.post("/image", upload.single("image"), async (req, res) => {
   }
 });
 
-app.listen(5000, () => console.log("Backend running on http://localhost:5000"));
+app.listen(PORT, () => {
+  console.log(`Backend running on http://localhost:${PORT}`);
+});
